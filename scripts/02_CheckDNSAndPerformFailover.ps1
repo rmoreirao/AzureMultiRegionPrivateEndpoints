@@ -27,8 +27,8 @@ $blobSecondaryDnsLinkName = "blob-link-to-$secondaryVnetName"
 
 # 1) Check KeyVault DNS on Primary Region VM
 # Execute the script with the following command on the Primary Region VM:
-# nslookup {key vault name}.vault.azure.net
-# nslookup {storage account name}.blob.core.windows.net
+# nslookup kv-multi-perm02.vault.azure.net
+# nslookup samultipe02.blob.core.windows.net
 # Expected Address for the DNS: internal IP address, which is valid - can connect to the Key Vault and Storage from this location
 
 # 2) Check KeyVault DNS on Secondary Region VM
@@ -39,56 +39,56 @@ $blobSecondaryDnsLinkName = "blob-link-to-$secondaryVnetName"
 
 # 3) Perform failover and reconfigure the Private DNS Zone Vnet links
 
-# Initiate Storage Account failover
-Write-Output "Initiating Storage Account failover for '$storageAccountName'..."
-$primaryResourceGroup = "$resourceGroupPrefix-$primaryRegion"
+# # Initiate Storage Account failover
+# Write-Output "Initiating Storage Account failover for '$storageAccountName'..."
+# $primaryResourceGroup = "$resourceGroupPrefix-$primaryRegion"
 
-# Check if failover is already in progress
-$failoverInProgress = $(az storage account show `
-    --name $storageAccountName `
-    --resource-group $primaryResourceGroup `
-    --query failoverInProgress)
+# # Check if failover is already in progress
+# $failoverInProgress = $(az storage account show `
+#     --name $storageAccountName `
+#     --resource-group $primaryResourceGroup `
+#     --query failoverInProgress)
 
-if ($failoverInProgress -eq $true) {
-    Write-Warning "Failover is already in progress for storage account '$storageAccountName'"
-} else {
-    Write-Output "Starting failover for storage account '$storageAccountName'..."
-    az storage account failover `
-        --name $storageAccountName `
-        --resource-group $primaryResourceGroup `
-        --yes
+# if ($failoverInProgress -eq $true) {
+#     Write-Warning "Failover is already in progress for storage account '$storageAccountName'"
+# } else {
+#     Write-Output "Starting failover for storage account '$storageAccountName'..."
+#     az storage account failover `
+#         --name $storageAccountName `
+#         --resource-group $primaryResourceGroup `
+#         --yes
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to initiate storage account failover"
-    }
-    Write-Output "Storage account failover initiated successfully"
-}
+#     if ($LASTEXITCODE -ne 0) {
+#         throw "Failed to initiate storage account failover"
+#     }
+#     Write-Output "Storage account failover initiated successfully"
+# }
 
-# Wait for failover to complete
-Write-Output "Waiting for storage account failover to complete..."
-$failoverComplete = $false
-$retryCount = 0
-$maxRetries = 30  # Maximum number of retries (30 x 20 seconds = 10 minutes maximum wait time)
+# # Wait for failover to complete
+# Write-Output "Waiting for storage account failover to complete..."
+# $failoverComplete = $false
+# $retryCount = 0
+# $maxRetries = 30  # Maximum number of retries (30 x 20 seconds = 10 minutes maximum wait time)
 
-while (-not $failoverComplete -and $retryCount -lt $maxRetries) {
-    $retryCount++
-    $failoverInProgress = $(az storage account show `
-        --name $storageAccountName `
-        --resource-group $primaryResourceGroup `
-        --query failoverInProgress)
+# while (-not $failoverComplete -and $retryCount -lt $maxRetries) {
+#     $retryCount++
+#     $failoverInProgress = $(az storage account show `
+#         --name $storageAccountName `
+#         --resource-group $primaryResourceGroup `
+#         --query failoverInProgress)
     
-    if ($failoverInProgress -eq $false) {
-        $failoverComplete = $true
-        Write-Output "Storage account failover completed successfully"
-    } else {
-        Write-Output "Failover still in progress. Waiting 20 seconds before checking again... (Attempt $retryCount of $maxRetries)"
-        Start-Sleep -Seconds 20
-    }
-}
+#     if ($failoverInProgress -eq $false) {
+#         $failoverComplete = $true
+#         Write-Output "Storage account failover completed successfully"
+#     } else {
+#         Write-Output "Failover still in progress. Waiting 20 seconds before checking again... (Attempt $retryCount of $maxRetries)"
+#         Start-Sleep -Seconds 20
+#     }
+# }
 
-if (-not $failoverComplete) {
-    throw "Failover did not complete within the expected time. Please check the storage account status manually."
-}
+# if (-not $failoverComplete) {
+#     throw "Failover did not complete within the expected time. Please check the storage account status manually."
+# }
 
 # Remove the VNet links from Primary Region
 Write-Output "Removing DNS Zone VNet links from primary region '$primaryRegion'..."
