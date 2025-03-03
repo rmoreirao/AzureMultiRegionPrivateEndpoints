@@ -1,19 +1,19 @@
 $ErrorActionPreference = "Stop"
 
-& "$PSScriptRoot/00_Secrets.ps1"
+. "$PSScriptRoot/00_Config.ps1"
+. "$PSScriptRoot/00_Secrets.ps1"
 
 # Define resource group prefix and regions
-$resourceGroupPrefix = "rg-multi-pe"
-$primaryRegion = "germanywestcentral"  # Primary region (correct name: lowercase)
-$secondaryRegion = "swedencentral"     # Secondary region (correct name: lowercase)
+$keyVaultName = Get-ConfigValue -Key "KeyVaultName"
+$resourceGroupPrefix = Get-ConfigValue -Key "ResourceGroupPrefix"
+$primaryRegion = Get-ConfigValue -Key "PrimaryRegion"
+$secondaryRegion = Get-ConfigValue -Key "SecondaryRegion"
 $regions = @($primaryRegion, $secondaryRegion)
-$vnetPrefix = "vnet-"
-$vnetAddressPrefix = "10.0.0.0/16"
-$keyVaultName = "kv-multi-perm01"  # Ensure unique name
-
-# Add a shared resource group for global resources
-$sharedResourceGroup = "rg-multi-pe-shared"
-$sharedResourceLocation = $primaryRegion  # Use primary region for global resources
+$vnetPrefix = Get-ConfigValue -Key "VNetPrefix"
+$vnetAddressPrefix = Get-ConfigValue -Key "VNetAddressPrefix"
+$subnets = Get-ConfigValue -Key "Subnets"
+$sharedResourceGroup = Get-ConfigValue -Key "SharedResourceGroup"
+$sharedResourceLocation = $primaryRegion
 
 # VM Configuration
 $vmSize = "Standard_E2s_v3"
@@ -24,12 +24,6 @@ $vmImageOffer = "WindowsServer"
 $vmImageSku = "2022-datacenter-azure-edition-hotpatch"
 $vmImageVersion = "latest"
 
-# Define subnets and their address prefixes
-$subnets = @{
-    "VirtualMachineSubnet"    = "10.0.0.0/24"
-    "PrivateEndpointSubnet"   = "10.0.1.0/24"
-    "AzureBastionSubnet"      = "10.0.2.0/27"  # Added required subnet for Azure Bastion
-}
 
 # First create the shared resource group for global resources
 Write-Output "Creating shared resource group '$sharedResourceGroup' in region '$sharedResourceLocation'..."
@@ -127,7 +121,8 @@ foreach ($region in $regions) {
             --name $bastionName `
             --location $region `
             --vnet-name $vnetName `
-            --public-ip-address $bastionPipName
+            --public-ip-address $bastionPipName `
+            --no-wait
     } else {
         Write-Output "Bastion '$bastionName' already exists, skipping creation."
     }
@@ -147,7 +142,8 @@ if (-not $keyVaultExists) {
         --resource-group $primaryResourceGroup `
         --location $primaryRegion `
         --default-action Deny `
-        --bypass AzureServices
+        --bypass AzureServices `
+        --public-network-access Disabled
 } else {
     Write-Output "Key Vault '$keyVaultName' already exists, skipping creation."
 }
@@ -184,14 +180,13 @@ if (-not $dnsLinkExists) {
 } else {
     Write-Output "DNS Link '$dnsLinkName' already exists, skipping creation."
 }
-
-# Create Private Endpoint for Key Vault
-$privateEndpointName = "pe-$keyVaultName"
+# Create Private Endpoint for Key Vault on Primary Region
+$privateEndpointName = "pe-$keyVaultName-$primaryRegion"
 # Check if Private Endpoint exists
 $privateEndpointExists = $(az network private-endpoint show --name $privateEndpointName --resource-group $primaryResourceGroup --query name -o tsv 2>$null)
 
 if (-not $privateEndpointExists) {
-    Write-Output "Creating Private Endpoint for Key Vault..."
+    Write-Output "Creating Private Endpoint for Key Vault in primary region '$primaryRegion'..."
     $keyVaultId = $(az keyvault show --name $keyVaultName --resource-group $primaryResourceGroup --query id -o tsv)
     
     az network private-endpoint create `
@@ -205,7 +200,7 @@ if (-not $privateEndpointExists) {
         --connection-name "connection-to-$keyVaultName"
         
     # Create DNS Zone Group for Private Endpoint
-    Write-Output "Creating DNS Zone Group for Private Endpoint..."
+    Write-Output "Creating DNS Zone Group for Private Endpoint in primary region..."
     az network private-endpoint dns-zone-group create `
         --resource-group $primaryResourceGroup `
         --endpoint-name $privateEndpointName `
@@ -214,4 +209,167 @@ if (-not $privateEndpointExists) {
         --zone-name "keyvault"
 } else {
     Write-Output "Private Endpoint '$privateEndpointName' already exists, skipping creation."
+}
+
+# Create Private Endpoint for Key Vault on Secondary Region
+$secondaryResourceGroup = "$resourceGroupPrefix-$secondaryRegion"
+$secondaryVnet = "$vnetPrefix$secondaryRegion"
+$secondaryPrivateEndpointName = "pe-$keyVaultName-$secondaryRegion"
+
+# Check if Private Endpoint exists in secondary region
+$secondaryPrivateEndpointExists = $(az network private-endpoint show --name $secondaryPrivateEndpointName --resource-group $secondaryResourceGroup --query name -o tsv 2>$null)
+
+if (-not $secondaryPrivateEndpointExists) {
+    Write-Output "Creating Private Endpoint for Key Vault in secondary region '$secondaryRegion'..."
+    $keyVaultId = $(az keyvault show --name $keyVaultName --resource-group $primaryResourceGroup --query id -o tsv)
+    
+    az network private-endpoint create `
+        --name $secondaryPrivateEndpointName `
+        --resource-group $secondaryResourceGroup `
+        --location $secondaryRegion `
+        --vnet-name $secondaryVnet `
+        --subnet "PrivateEndpointSubnet" `
+        --private-connection-resource-id $keyVaultId `
+        --group-id vault `
+        --connection-name "connection-to-$keyVaultName"
+        
+    # Create DNS Zone Group for Private Endpoint
+    Write-Output "Creating DNS Zone Group for Private Endpoint in secondary region..."
+    az network private-endpoint dns-zone-group create `
+        --resource-group $secondaryResourceGroup `
+        --endpoint-name $secondaryPrivateEndpointName `
+        --name "keyvault-zone-group" `
+        --private-dns-zone $(az network private-dns zone show --name $privateDnsZoneName --resource-group $sharedResourceGroup --query id -o tsv) `
+        --zone-name "keyvault"
+} else {
+    Write-Output "Private Endpoint '$secondaryPrivateEndpointName' already exists, skipping creation."
+}
+
+# Create Storage Account in primary region with private endpoint
+$storageAccountName = Get-ConfigValue -Key "StorageAccountName"
+$primaryResourceGroup = "$resourceGroupPrefix-$primaryRegion"
+$primaryVnet = "$vnetPrefix$primaryRegion"
+
+# Check if Storage Account exists
+$storageAccountExists = $(az storage account show --name $storageAccountName --resource-group $primaryResourceGroup --query name -o tsv 2>$null)
+
+if (-not $storageAccountExists) {
+    Write-Output "Creating Storage Account '$storageAccountName' in primary region '$primaryRegion'..."
+    az storage account create `
+        --name $storageAccountName `
+        --resource-group $primaryResourceGroup `
+        --location $primaryRegion `
+        --sku Standard_GRS `
+        --kind StorageV2 `
+        --enable-hierarchical-namespace false `
+        --min-tls-version TLS1_2 `
+        --allow-blob-public-access false `
+        --default-action Deny `
+        --bypass AzureServices
+
+    # Wait for storage account to be fully provisioned
+    Start-Sleep -Seconds 10
+} else {
+    Write-Output "Storage Account '$storageAccountName' already exists, skipping creation."
+}
+
+# Create Private DNS Zone for Blob Storage
+$blobDnsZoneName = "privatelink.blob.core.windows.net"
+
+# Check if Private DNS Zone for Blob exists
+$blobDnsZoneExists = $(az network private-dns zone show --name $blobDnsZoneName --resource-group $sharedResourceGroup --query name -o tsv 2>$null)
+
+if (-not $blobDnsZoneExists) {
+    Write-Output "Creating Private DNS Zone '$blobDnsZoneName' in shared resource group..."
+    az network private-dns zone create `
+        --resource-group $sharedResourceGroup `
+        --name $blobDnsZoneName
+} else {
+    Write-Output "Private DNS Zone '$blobDnsZoneName' already exists, skipping creation."
+}
+
+# Link Blob Private DNS Zone to VNet in primary region
+$blobDnsLinkName = "blob-link-to-$primaryVnetName"
+
+# Check if Blob DNS link exists
+$blobDnsLinkExists = $(az network private-dns link vnet show --name $blobDnsLinkName --resource-group $sharedResourceGroup --zone-name $blobDnsZoneName --query name -o tsv 2>$null)
+
+if (-not $blobDnsLinkExists) {
+    Write-Output "Linking Blob Private DNS Zone to VNet in $primaryRegion region..."
+    az network private-dns link vnet create `
+        --resource-group $sharedResourceGroup `
+        --zone-name $blobDnsZoneName `
+        --name $blobDnsLinkName `
+        --virtual-network $(az network vnet show --resource-group $primaryResourceGroup --name $primaryVnetName --query id -o tsv) `
+        --registration-enabled false
+} else {
+    Write-Output "Blob DNS Link '$blobDnsLinkName' already exists, skipping creation."
+}
+
+# Create Private Endpoint for Blob Storage in Primary Region
+$blobPrivateEndpointName = "pe-$storageAccountName-blob-$primaryRegion"
+
+# Check if Blob Private Endpoint exists
+$blobPrivateEndpointExists = $(az network private-endpoint show --name $blobPrivateEndpointName --resource-group $primaryResourceGroup --query name -o tsv 2>$null)
+
+if (-not $blobPrivateEndpointExists) {
+    Write-Output "Creating Private Endpoint for Blob Storage in primary region '$primaryRegion'..."
+    $storageAccountId = $(az storage account show --name $storageAccountName --resource-group $primaryResourceGroup --query id -o tsv)
+    
+    az network private-endpoint create `
+        --name $blobPrivateEndpointName `
+        --resource-group $primaryResourceGroup `
+        --location $primaryRegion `
+        --vnet-name $primaryVnet `
+        --subnet "PrivateEndpointSubnet" `
+        --private-connection-resource-id $storageAccountId `
+        --group-id blob `
+        --connection-name "connection-to-$storageAccountName-blob"
+        
+    # Create DNS Zone Group for Blob Private Endpoint
+    Write-Output "Creating DNS Zone Group for Blob Private Endpoint in primary region..."
+    az network private-endpoint dns-zone-group create `
+        --resource-group $primaryResourceGroup `
+        --endpoint-name $blobPrivateEndpointName `
+        --name "blob-zone-group" `
+        --private-dns-zone $(az network private-dns zone show --name $blobDnsZoneName --resource-group $sharedResourceGroup --query id -o tsv) `
+        --zone-name "blob"
+} else {
+    Write-Output "Blob Private Endpoint '$blobPrivateEndpointName' already exists, skipping creation."
+}
+
+# Link Blob Private DNS Zone to VNet in secondary region
+$secondaryResourceGroup = "$resourceGroupPrefix-$secondaryRegion"
+$secondaryVnet = "$vnetPrefix$secondaryRegion"
+
+# Create Private Endpoint for Blob Storage in Secondary Region
+$blobPrivateEndpointNameSecondary = "pe-$storageAccountName-blob-$secondaryRegion"
+
+# Check if Blob Private Endpoint exists in secondary region
+$blobPrivateEndpointExistsSecondary = $(az network private-endpoint show --name $blobPrivateEndpointNameSecondary --resource-group $secondaryResourceGroup --query name -o tsv 2>$null)
+
+if (-not $blobPrivateEndpointExistsSecondary) {
+    Write-Output "Creating Private Endpoint for Blob Storage in secondary region '$secondaryRegion'..."
+    $storageAccountId = $(az storage account show --name $storageAccountName --resource-group $primaryResourceGroup --query id -o tsv)
+    
+    az network private-endpoint create `
+        --name $blobPrivateEndpointNameSecondary `
+        --resource-group $secondaryResourceGroup `
+        --location $secondaryRegion `
+        --vnet-name $secondaryVnet `
+        --subnet "PrivateEndpointSubnet" `
+        --private-connection-resource-id $storageAccountId `
+        --group-id blob `
+        --connection-name "connection-to-$storageAccountName-blob"
+        
+    # Create DNS Zone Group for Secondary Blob Private Endpoint
+    Write-Output "Creating DNS Zone Group for Blob Private Endpoint in secondary region..."
+    az network private-endpoint dns-zone-group create `
+        --resource-group $secondaryResourceGroup `
+        --endpoint-name $blobPrivateEndpointNameSecondary `
+        --name "blob-zone-group" `
+        --private-dns-zone $(az network private-dns zone show --name $blobDnsZoneName --resource-group $sharedResourceGroup --query id -o tsv) `
+        --zone-name "blob"
+} else {
+    Write-Output "Blob Private Endpoint '$blobPrivateEndpointNameSecondary' already exists, skipping creation."
 }
